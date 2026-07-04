@@ -1,31 +1,103 @@
 import { motion } from 'framer-motion';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Play, Pause, RotateCcw, Zap, Download,
   Activity, CheckCircle, AlertTriangle, AlertOctagon,
-  Wrench, TrendingUp, Shield, Clock,
+  Wrench, Shield, Clock,
 } from 'lucide-react';
 import { useSimulation } from '../store/SimulationContext';
 import { getFleetStats } from '../data/mockFleet';
 import { GlassCard, AnimatedCounter, StatusBadge, SectionHeader } from '../components/ui/index';
 import { LiveLineChart } from '../components/charts/LiveLineChart';
+import { api, type AircraftAnalyticsResponse, type DashboardSummaryResponse } from '../lib/api';
+import type { SensorReading } from '../types';
 
 const fadeUp = (delay = 0) => ({
   initial: { opacity: 0, y: 18 },
   animate: { opacity: 1, y: 0 },
-  transition: { duration: 0.45, delay, ease: 'easeOut' },
+  transition: { duration: 0.45, delay, ease: 'easeOut' as const },
 });
 
 export default function Dashboard() {
   const { state, startSimulation, pauseSimulation, resumeSimulation, resetSimulation, injectFault } = useSimulation();
   const stats = getFleetStats(state.fleet);
   const { currentReading: r, sensorHistory } = state;
-
+  const [summary, setSummary] = useState<DashboardSummaryResponse | null>(null);
+  const [analytics, setAnalytics] = useState<AircraftAnalyticsResponse | null>(null);
   const fleetCards = [
     { label: 'Total Aircraft', value: stats.total, icon: <Activity size={18} />, color: '#00D4FF' },
     { label: 'Healthy', value: stats.healthy, icon: <CheckCircle size={18} />, color: '#22C55E' },
     { label: 'Warning', value: stats.warning, icon: <AlertTriangle size={18} />, color: '#F59E0B' },
     { label: 'Critical', value: stats.critical, icon: <AlertOctagon size={18} />, color: '#EF4444' },
   ];
+
+  useEffect(() => {
+    let alive = true;
+
+    const loadDemoData = async () => {
+      try {
+        const [summaryResponse, analyticsResponse] = await Promise.all([
+          api.get<{ success: boolean; data: DashboardSummaryResponse }>('/fleet/dashboard-summary'),
+          api.get<{ success: boolean; data: AircraftAnalyticsResponse }>('/fleet/aircraft/N67890/analytics?limit=24'),
+        ]);
+
+        if (!alive) return;
+
+        setSummary(summaryResponse.data.data);
+        setAnalytics(analyticsResponse.data.data);
+      } catch {
+        if (!alive) return;
+        setSummary(null);
+        setAnalytics(null);
+      }
+    };
+
+    void loadDemoData();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const backendAircraftLabel = analytics?.aircraft.tailNumber ?? 'Demo fleet loaded';
+  const backendSensorHistory = useMemo<SensorReading[]>(() => {
+    if (!analytics?.series.length) {
+      return sensorHistory.slice(-60);
+    }
+
+    return analytics.series.map((point, index) => {
+      const temperature = Math.round(point.engineTemperature);
+      const vibration = Number(point.vibrationLevel.toFixed(2));
+      const healthScore = Math.max(0, Math.min(100, Math.round(100 - (temperature - 800) * 0.12 - vibration * 2)));
+      const failureProbability = Math.max(0, Math.min(100, Math.round((temperature > 950 ? 35 : 10) + vibration * 4)));
+
+      return {
+        timestamp: new Date(point.timestamp).getTime() || Date.now() + index * 1000,
+        temperature,
+        pressure: Math.round(point.oilPressure),
+        rpm: Math.round(12000 + vibration * 900),
+        fuelFlow: Math.round(1600 + vibration * 35),
+        oilPressure: Number(point.oilPressure.toFixed(1)),
+        vibration,
+        exhaustGasTemp: temperature + 20,
+        compressorRatio: Number((30 + (temperature - 780) / 50).toFixed(1)),
+        healthScore,
+        failureProbability,
+        remainingUsefulLife: Math.max(200, 5000 - failureProbability * 28),
+      };
+    });
+  }, [analytics, sensorHistory]);
+
+  const summaryCards = useMemo(() => {
+    if (!summary) return fleetCards;
+
+    return [
+      { label: 'Total Aircraft', value: summary.totalPlanes, icon: <Activity size={18} />, color: '#00D4FF' },
+      { label: 'Operational', value: summary.operationalCount, icon: <CheckCircle size={18} />, color: '#22C55E' },
+      { label: 'Critical Alerts', value: summary.activeCriticalAlerts, icon: <AlertOctagon size={18} />, color: '#EF4444' },
+      { label: 'Tracked Engines', value: 8, icon: <Wrench size={18} />, color: '#38BDF8' },
+    ];
+  }, [summary, stats]);
 
   const aiMetrics = [
     { label: 'Fleet Health Score', value: stats.avgHealth, unit: '%', color: stats.avgHealth > 80 ? '#22C55E' : stats.avgHealth > 60 ? '#F59E0B' : '#EF4444' },
@@ -59,7 +131,7 @@ export default function Dashboard() {
 
       {/* Fleet Stats Row */}
       <motion.div {...fadeUp(0.05)} style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-        {fleetCards.map((c, i) => (
+        {summaryCards.map((c, i) => (
           <GlassCard key={i} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span style={{ fontSize: 11, color: '#64748B', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{c.label}</span>
@@ -153,10 +225,10 @@ export default function Dashboard() {
         <GlassCard>
           <SectionHeader
             title="Live Health Score"
-            subtitle={`Selected: ${state.fleet.find(f => f.id === state.selectedAircraftId)?.registration ?? ''}`}
+            subtitle={`Selected: ${state.fleet.find(f => f.id === state.selectedAircraftId)?.registration ?? ''} · Backend: ${backendAircraftLabel}`}
           />
           <LiveLineChart
-            data={sensorHistory.slice(-60)}
+            data={backendSensorHistory}
             dataKey="healthScore"
             color="#22C55E"
             unit="%"
